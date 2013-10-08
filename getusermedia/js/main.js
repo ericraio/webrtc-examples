@@ -1,5 +1,6 @@
-// A Shiv for the diffent browser prefix getUserMedia
+// Two Shivs for the diffent browser prefix
 navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+window.URL = window.URL || window.webkitURL;
 
 var constraints = { video: true, audio: true }
 
