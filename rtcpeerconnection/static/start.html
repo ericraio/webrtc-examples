@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=utf-8" />
+
+    <title>WebRTC Demo</title>
+
+    <style>
+      video {
+        width: 320px;
+        height: 240px;
+        border: 1px solid #000;
+      }
+      div { display: inline-block; }
+    </style>
+  </head>
+  <body>
+    <!-- blank script section is placeholder for query params -->
+    <script></script>
+
+    <!--load polyfill, local copy first for local testing-->
+    <script src="adapter.js"></script>
+    <script src="https://webrtc.googlecode.com/svn/trunk/samples/js/base/adapter.js"></script>
+
+    <!--load XHR-based signaling channel that direct connects based on a key-->
+    <script src="clientXHRSignalingChannel.js"></script>
+    <script>
+      var signalingChannel, key, id,
+          haveLocalMedia = false,
+          weWaited = false,
+          myVideoStream, myVideo,
+          yourVideoStream, yourVideo,
+          doNothing = function() {},
+          pc,
+          constraints = { mandatory: { OfferToReceiveAudio: true, OfferToReceiveVideo: true } };
+
+      ////
+      // This is the main routine.
+      ///
+      // This kicks off acquistiion of local media. Also, it can
+      // automatically start the signaling channel.
+      window.onload = function() {
+        // auto-connect signaling channel if key provided in URI
+       if (queryparams && queryparams['key']) {
+         document.getElementById('key').value = queryparams['key'];
+         connect();
+       }
+
+       myVideo = document.getElementById('myVideo');
+       yourVideo = document.getElementById('yourVideo');
+
+       getMedia();
+
+       // connect() calls createPC() when connected.
+       // attacheMedia() is called when both createPC() and getMedia()
+       // have succeeded
+      };
+
+
+      ///////////////
+      // This next section is for setting up the signaling channel
+      //////////////
+
+      // This routine connects to the web server and sets up the
+      // signaling channel. It is called either automatically on doc
+      // load or when the user clicks on the "Connect" button.
+      function connect() {
+        var errorCB, scHandlers, handleMsg;
+
+        // First, get the key used to connect
+        key = document.getElementById("key").value;
+
+        // This is the handler for all messages received on the 
+        // signaling channel.
+        handleMsg = function(msg) {
+          // First, we post the message on-screen
+          var msgE = document.getElementById("inmessages");
+          msgE.innerHTML = JSON.stringify(msg) + "<br />" + msgE.innerHTML;
+
+          // Then, we take action based on the kind of message
+          if (msg.type === "offer") {
+            pc.setRemoteDescription(new RTCSessionDescription(msg));
+            answer();
+          } else if (msg.type === "answer") {
+            pc.setRemoteDescription(new RTCSessionDescription(msg));
+          } else if (msg.type === "candidate") {
+            pc.addIceCandidate(new RTCIceCandidate({
+              sdpMLineIndex: msg.mlineindex,
+              candidate: msg.candidate
+            }));
+          };
+        };
+
+        // handlers for signaling channel
+        scHandlers = {
+          onWaiting: function() {
+            setStatus("Waiting");
+            // weWaited will be used later for auto-call
+            weWaited = true;
+          },
+          onConnected: function() {
+            setStatus("Connected");
+            // set up the RTC Peer Connection since we're connected
+            createPC();
+          },
+          onMessage: handleMsg
+        };
+
+        // Finally, create signaling channel
+        signalingChannel = createSignalingChannel(key, scHandlers);
+        errorCB = function (msg) {
+          document.getElementById("response").innerHTML = msg;
+        }
+
+        // and connect
+        signalingChannel.connect(errorCB);
+      }
+
+      // This routine sends a message on the signaling channel, either
+      // by explicit call or by the user clicking on the Send button.
+      function send(msg) {
+        var handler = function (res) {
+          document.getElementById("response").innerHTML = res;
+          return;
+        },
+
+        // Get message if not passed in
+        msg = msg || document.getElementById("message").value
+
+        // post it on-screen
+       msgE = document.getElementById("outmessages");
+       msgE.innerHTML = JSON.stringify(msg) + "<br />" + msgE.innerHTML;
+
+       // and send on signaling channel
+       signalingChannel.send(msg, handler);
+      }
+
+      ///////////////
+      // This section is for getting local media
+      //////////////
+      function getMedia() {
+        var constraints = { audio: true, video: true }
+        getUserMedia(constraints, gotUserMedia, didntGetUserMedia);
+      };
+
+      function gotUserMedia(stream) {
+        myVideoStream = stream;
+        haveLocalMedia = true;
+
+        // display my local video to me
+        attachMediaStream(myVideo, myVideoStream);
+        // wait for RTCPeerConnection to be created
+        attachMediaIfReady()
+      }
+
+      function didntGetUserMedia() {
+        console.log("couldn't get video");
+      }
+
+      ///////////////////
+      // This next section is for setting up the RTC Peer Connection
+      //////////////////
+      function createPC() {
+        pc = new RTCPeerConnection({
+          iceServers: [{
+            url: "stun:stun.1.google.com:19302"
+          }]
+        });
+        pc.onicecandidate = onIceCandidate;
+        pc.onaddstream = onRemoteStreamAdded;
+        pc.onremovestream = onRemoteStreamRemoved;
+
+        // wait for local media to be ready
+        attachMediaIfReady();
+      }
+
+      // When our browser has another candidate, send it to the peer
+      function onIceCandidate(e) {
+        if (e.candidate) {
+          send({
+            type: 'candidate',
+            mlineindex: e.candidate.sdpMLineIndex,
+            candidate: e.candidate.candidate
+          });
+        }
+      }
+
+      // When our browser detects that the other side has added the
+      // media stream, show it on screen
+      function onRemoteStreamAdded(e) {
+        yourVideoStream = e.stream;
+        attachMediaStream(yourVideo, yourVideoStream);
+        setStatus("On call");
+      }
+
+      // Yes, we do nothing if the remote side removes the stream.
+      // This is a *simple* demo, after all
+      function onRemoteStreamRemoved(e) {}
+
+      //////////////////////////////////
+      // This next section is for attaching local media to the Peer 
+      // Connection.
+      //////////////////////////////////
+
+      // This guard routine effectively synchronizes completion of two
+      // async activities: the creation of the Peer Connection and
+      // acquisition of local media.
+      function attachMediaIfReady() {
+        // If RTCPeerConnection is ready and we have local media,
+        // proceed.
+        if (pc && haveLocalMedia) { attachMedia(); }
+      }
+
+      // This routine adds our local media stream to the Peer
+      // Connection. Note that this does not cause any media to flow.
+      // All it does is to let the browser know to include this stream
+      // in its next SDP description.
+      function attachMedia() {
+        pc.addStream(myVideoStream);
+        setStatus("Ready for call");
+
+        // auto-call if truthy value for call param in URI
+        // but also make sure we were the last to connect (to increase
+        // chances that everything is set up properly at both ends)
+        if (queryparams && queryparams['call'] && !weWaited) {
+          call();
+        }
+
+      }
+
+      ///////////////////////
+      // This next section is for calling and answering
+      ///////////////////////
+
+     // This generates the sesssion description for an offer
+     function call() {
+       pc.createOffer(gotDescription, doNothing, constraints)
+     }
+
+     // and this generates it for an answer.
+     function answer() {
+       pc.createAnswer(gotDescription, doNothing, constraints)
+     }
+
+     // In either case, once we get the session description we tell
+     // our browser to use it as our local description and then send
+     // it to the other browser. It is the setting of the local
+     // description that allows the browser to send media and prepare
+     // to receive from the other side.
+     function gotDescription(localDesc) {
+       pc.setLocalDescription(localDesc);
+       send(localDesc);
+     }
+
+     //////////////////////
+     // This section is for changing the UI based on application progress.
+     //////////////////////
+
+     // This function hides, displays, and fills various UI elements
+     // to give the user some idea of how the browser is progressing
+     // at setting up the signaling channel, getting local media,
+     // creating the peer connection, and actually connecting
+     // media (calling).
+     function setStatus(str) {
+       var statuslineE = document.getElementById("statusline");
+       var statusE = document.getElementById("status");
+       var sendE = document.getElementById("send");
+       var connectE = document.getElementById("connect");
+       var callE = document.getElementById("call");
+       var scMessageE = document.getElementById("scMessage");
+
+       switch (str) {
+         case "Waiting":
+           statuslineE.style.display = "inline";
+           statusE.innerHTML = "waiting for peer signaling connection";
+           sendE.style.display = "none";
+           connectE.style.display = "none";
+           break;
+         case "Connected":
+           statuslineE.style.display = "inline";
+           statusE.innerHTML = "Peer signaling connected, waiting for local media";
+           sendE.style.display = "inline";
+           connectE.style.display = "none";
+           scMessageE.style.display = "inline-block";
+           break;
+         case "Ready for call":
+           statusE.innerHTML = "Ready for call";
+           callE.style.display = "none";
+           break;
+         case "On call":
+           statusE.innerHTML = "On call";
+           callE.style.display = "none";
+           break;
+         default:
+       }
+     }
+    </script>
+
+    <div id="setup">
+      <p>WebRTC Demo</p>
+      <p>Key:
+        <input type="text" name="key" id="key" />
+        <button id="connect" onclick="connect()">Connect</button>
+        <span id="statusline" style="display:none;">Status:
+          <span id="status">Disconnected</span>
+        </span>
+        <button id="call" style="display:none;" onclick="call()">Call</button>
+      </p>
+    </div>
+
+    <div id="scMessage" style="float:right;display:none;">
+      <p>Message:
+        <input type="text" name="message" id="message" width="100%" />
+        <button id="send" style="display:none;" onclick="send()">Send</button>
+      </p>
+
+      <p>Response: <span id="response"></span></p>
+    </div>
+
+    <br />
+
+    <div style="width:45%;vertical-align:top">
+      <div>
+        <video muted="true" id="myVideo" muted="true" autoplay="autoplay" controls />
+      </div>
+      <p><b>Outgoing Messages</b>
+        <br />
+        <span id="outmessages"></span>
+      </p>
+    </div>
+    <div style="width:45%;vertical-align:top;">
+      <div>
+        <video id="yourVideo" autoplay="autoplay" controls />
+      </div>
+      <p><b>Incoming Messages</b>
+        <br />
+        <span id="inmessages"></span>
+      </p>
+    </div>
+
+  </body>
+</html>
